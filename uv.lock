@@ -1297,7 +1297,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "torch" },
     { name = "tqdm", specifier = ">=4.67.3" },
-    { name = "transformers", specifier = ">=5.5" },
+    { name = "transformers", specifier = ">=4.53" },
 ]
 provides-extras = ["dev"]
 

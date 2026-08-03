@@ -12,3 +12,9 @@ dist/
 *.pt
 slice*.html
 slices/
+
+# manual excludes
+output
+~*
+*~
+*~.*
