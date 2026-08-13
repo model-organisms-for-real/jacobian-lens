@@ -44,21 +44,6 @@ published) and `<model>_convergence.csv` (the per-prompt curve, same columns as
 the published `*_convergence.csv`). `<model>_checkpoint.pt` exists only while
 the fit is running.
 
-Their run stopped early at 467 of 1000 prompts (~10 min on a B200, ~0.57 s per
-prompt after the ~40 s `torch.compile` warmup; an H100 measures ~0.72 s per
-prompt).
-
-Progress is a tqdm bar with the live metrics in its postfix:
-
-```
-fitting:  38% 380/1000 [04:42<07:41,  1.34prompt/s, fitted=380 dmean=2.31e-03 ident=0.731]
-```
-
-It turns itself off when stderr is not a terminal (piped to a file, `nohup`,
-CI), falling back to one log line per prompt; `--no_progress` forces that mode.
-Log records and warnings go through `tqdm.write`, so they scroll above the bar
-rather than through it.
-
 ### Metric fidelity
 
 Neither convergence metric is defined in upstream `jlens`, so both were
