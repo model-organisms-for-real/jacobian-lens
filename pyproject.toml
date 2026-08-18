@@ -17,8 +17,6 @@ dependencies = [
     "ipython>=8.39.0",
     "ipykernel>=7.3.0",
     "matplotlib>=3.10.9",
-    "datasets>=4.8.5",
-    "tqdm>=4.67.3",
 ]
 
 [project.urls]

@@ -1256,7 +1256,6 @@ name = "jlens"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "datasets" },
     { name = "huggingface-hub" },
     { name = "ipykernel" },
     { name = "ipython", version = "8.39.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1266,7 +1265,6 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "torch" },
-    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -1286,7 +1284,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "datasets", specifier = ">=4.8.5" },
     { name = "datasets", marker = "extra == 'dev'" },
     { name = "huggingface-hub" },
     { name = "ipykernel", specifier = ">=7.3.0" },
@@ -1296,7 +1293,6 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "torch" },
-    { name = "tqdm", specifier = ">=4.67.3" },
     { name = "transformers", specifier = ">=5.5" },
 ]
 provides-extras = ["dev"]
