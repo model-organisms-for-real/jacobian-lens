@@ -31,17 +31,13 @@ Run::
     uv run python scripts/fit_lens.py meta-llama/Llama-3.1-8B --n_prompts 1000 \
         --stop_at_delta 1e-3
 
-    # A different corpus (any parquet-backed HF dataset with a text column;
-    # script-based datasets are no longer loadable by `datasets`):
+    # A different corpus (any HF dataset with a text column):
     uv run python scripts/fit_lens.py Qwen/Qwen3.5-0.8B \
-        --dataset HuggingFaceFW/fineweb --dataset_config sample-10BT --text_field text
+        --dataset stas/openwebtext-10k --dataset_config none --text_field text
 
 Fitting is checkpointed after every prompt, so it is safe to interrupt and
-resume (re-run the same command; ``--no_resume`` starts over instead). The
-checkpoint uses upstream's format plus a ``fit_config`` fingerprint of the
-model/corpus, so :func:`jlens.fit` can resume one of these runs and vice versa,
-while a leftover checkpoint from a different corpus is refused rather than
-silently mixed in.
+resume; the checkpoint uses upstream's format, so :func:`jlens.fit` can resume
+one of these runs and vice versa.
 
 Both metrics were reverse-engineered from Neuronpedia's published convergence
 curves and reproduce them (see :func:`relative_change` and the numbers in
@@ -181,13 +177,10 @@ class ConvergenceTracker:
       ``stop_at_delta`` (smoothing avoids tripping on a single noisy step).
 
     Args:
-        csv_path: Convergence curve destination.
+        csv_path: Convergence curve destination. Appended to (without a
+            repeated header) when it already exists, so a resumed fit extends
+            the curve instead of truncating it.
         thresholds: Δmean levels to report first-crossing prompt counts for.
-        append: Extend an existing file (without repeating the header) instead
-            of truncating it. Pass ``True`` when resuming from a checkpoint,
-            so the curve continues where the interrupted run left off; a fresh
-            fit should start a fresh curve, otherwise a refit into the same
-            directory appends a second curve to the first.
         stop_at_delta: Smoothed Δmean below which to stop; ``None`` disables
             early stopping.
         min_prompts: Never stop early before this many prompts.
@@ -199,7 +192,6 @@ class ConvergenceTracker:
         csv_path: str,
         thresholds: Sequence[float],
         *,
-        append: bool = False,
         stop_at_delta: float | None = None,
         min_prompts: int = 100,
         window: int = 10,
@@ -213,11 +205,10 @@ class ConvergenceTracker:
         self.stopped_at: int | None = None
         self._crossed: dict[float, int] = {}
         self._recent: deque[float] = deque(maxlen=self.window)
-        has_rows = append and os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-        mode = "a" if append else "w"
-        self._file = open(csv_path, mode, newline="")  # noqa: SIM115 (see close())
+        is_new = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+        self._file = open(csv_path, "a", newline="")  # noqa: SIM115 (see close())
         self._writer = csv.writer(self._file)
-        if not has_rows:
+        if is_new:
             self._writer.writerow(
                 [
                     "n_done",
@@ -342,8 +333,6 @@ def fit_with_metrics(
     skip_first: int = jlens.fitting.SKIP_FIRST_N_POSITIONS,
     checkpoint_path: str | None = None,
     checkpoint_every: int = 1,
-    resume: bool = True,
-    fit_config: dict[str, object] | None = None,
     progress: bool = True,
 ) -> jlens.JacobianLens:
     """:func:`jlens.fit` with per-prompt metrics and early stopping.
@@ -351,8 +340,7 @@ def fit_with_metrics(
     Same accumulation, checkpoint format and skip-on-short-prompt behaviour as
     upstream :func:`jlens.fit`; the per-prompt Jacobians themselves come from
     :func:`jlens.jacobian_for_prompt`. The only additions are the ``tracker``
-    callback (which may end the fit early), the two metrics fed to it, and the
-    optional ``fit_config`` fingerprint stored alongside the checkpoint.
+    callback (which may end the fit early) and the two metrics fed to it.
 
     Args:
         model: The model to fit on.
@@ -366,18 +354,6 @@ def fit_with_metrics(
         skip_first: Leading positions excluded from the Jacobian average.
         checkpoint_path: If set, resume from and write a checkpoint here.
         checkpoint_every: Write the checkpoint every N prompts.
-        resume: With ``False``, an existing checkpoint is ignored and
-            overwritten by the fresh fit (as ``resume=False`` does in upstream
-            :func:`jlens.fit`).
-        fit_config: Anything that determines *what* is being averaged but is
-            not in upstream's checkpoint keys — the model id, the corpus, the
-            prompt truncation. Written into the checkpoint under
-            ``"fit_config"`` and compared key by key on resume, so a leftover
-            checkpoint from a different corpus refuses to resume instead of
-            silently mixing two runs into one lens. Keys absent from the
-            checkpoint (one written by upstream :func:`jlens.fit`, or by an
-            older version of this script) are not checked, so those remain
-            resumable; upstream in turn ignores the extra key.
         progress: Show a tqdm bar (with the live metrics in its postfix) and
             demote the per-prompt log line to DEBUG. With ``False``, every
             prompt logs a line at INFO instead, as upstream :func:`jlens.fit`
@@ -389,36 +365,18 @@ def fit_with_metrics(
     d_model = model.d_model
     deepest_layer = max(source_layers)
 
-    if resume and checkpoint_path is not None and os.path.exists(checkpoint_path):
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
         state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        checks: list[tuple[str, object, object]] = [
-            (key, state.get(key), expected)
-            for key, expected in (
-                ("source_layers", list(source_layers)),
-                ("target_layer", target_layer),
-                ("skip_first", skip_first),
-            )
-            if key in state
-        ]
-        saved_config = state.get("fit_config") or {}
-        checks += [
-            (key, saved_config[key], expected)
-            for key, expected in (fit_config or {}).items()
-            if key in saved_config
-        ]
-        for key, saved, expected in checks:
-            if saved != expected:
+        for key, expected in (
+            ("source_layers", list(source_layers)),
+            ("target_layer", target_layer),
+            ("skip_first", skip_first),
+        ):
+            if key in state and state[key] != expected:
                 raise SystemExit(
                     f"checkpoint at {checkpoint_path} was fitted with {key}="
-                    f"{saved!r}, not {expected!r}; pass --no_resume (or delete "
-                    "the checkpoint) to start over"
+                    f"{state[key]!r}, not {expected!r}; delete it to start over"
                 )
-        if fit_config and not saved_config:
-            logger.warning(
-                "checkpoint at %s records no fit_config (written by jlens.fit or "
-                "an older fit_lens.py); cannot verify it used the same corpus",
-                checkpoint_path,
-            )
         jacobian_sum = state["jacobian_sum"]
         n_done = state["n_done"]
         next_idx = state["next_idx"]
@@ -438,18 +396,17 @@ def fit_with_metrics(
 
     def write_checkpoint() -> None:
         if checkpoint_path is not None:
-            state = {
-                "jacobian_sum": jacobian_sum,
-                "n_done": n_done,
-                "next_idx": next_idx,
-                "source_layers": list(source_layers),
-                "target_layer": target_layer,
-                "skip_first": skip_first,
-            }
-            if fit_config:
-                # Extra key on top of upstream's format; jlens.fit ignores it.
-                state["fit_config"] = dict(fit_config)
-            _atomic_save(state, checkpoint_path)
+            _atomic_save(
+                {
+                    "jacobian_sum": jacobian_sum,
+                    "n_done": n_done,
+                    "next_idx": next_idx,
+                    "source_layers": list(source_layers),
+                    "target_layer": target_layer,
+                    "skip_first": skip_first,
+                },
+                checkpoint_path,
+            )
 
     logger.info(
         "fitting %d source layers (target=L%d) on %d prompts",
@@ -598,12 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="dotted path to the text decoder (auto-detected)",
     )
     parser.add_argument(
-        "--no_compile",
-        action="store_true",
-        help=(
-            "disable per-layer torch.compile (implied whenever --device_map "
-            "actually shards the model across several devices; see --device_map)"
-        ),
+        "--no_compile", action="store_true", help="disable per-layer torch.compile"
     )
     parser.add_argument(
         "--device_map",
@@ -611,11 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "how to place the model: 'cuda' = single GPU (.cuda()); "
             "'auto' (or any accelerate device_map) = shard across all visible GPUs "
-            "for models too large for one card. Sharding needs the `accelerate` "
-            "package, which is not a jlens dependency, and upstream jlens says not "
-            "to combine it with compile, so when the loaded model ends up on more "
-            "than one device the script turns compile off (with a warning) as if "
-            "--no_compile had been passed"
+            "for models too large for one card"
         ),
     )
     parser.add_argument(
@@ -628,12 +576,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--hf_cache_dir",
         default=None,
         help=(
-            "HuggingFace cache dir for this fit's downloads: model weights and "
-            "tokenizer files, the xet chunk cache and the datasets cache all go "
-            "here (see --delete_hf_cache). Not confined: the small dataset card "
-            "that `datasets` fetches to resolve --dataset, and remote-code modules "
-            "under --trust_remote_code, which still land in the default "
-            "~/.cache/huggingface."
+            "HuggingFace cache dir for weights. When set, ALL HF downloads are "
+            "confined here (see --delete_hf_cache)."
         ),
     )
     parser.add_argument(
@@ -649,17 +593,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="write the resumable checkpoint every N prompts",
-    )
-    parser.add_argument(
-        "--no_resume",
-        action="store_true",
-        help=(
-            "start over instead of resuming an interrupted fit: ignore (and "
-            "overwrite) any <out_dir>/<model>_checkpoint.pt and truncate the "
-            "convergence CSV. Without this a leftover checkpoint is resumed, "
-            "which is refused if it records a different model, corpus or "
-            "--max_seq_len"
-        ),
     )
     parser.add_argument(
         "--no_progress",
@@ -753,31 +686,14 @@ def main() -> None:
         "float32": torch.float32,
     }[args.dtype]
 
-    # Point the HF caches at --hf_cache_dir so the bulk of what a fit downloads
-    # can be wiped wholesale afterwards. What actually lands there:
-    #   * model weights, config and tokenizer files: via the explicit
-    #     `cache_dir=` passed to `from_pretrained` below;
-    #   * the xet chunk cache: `hf_xet` is imported lazily on first download
-    #     and reads HF_XET_CACHE (falling back to HF_HOME) at call time;
-    #   * the `datasets` cache: `datasets` is imported lazily in `load_prompts`
-    #     and reads HF_DATASETS_CACHE / HF_HOME at import.
-    # What does NOT: `huggingface_hub` was imported (via `transformers`) at the
-    # top of this file and computed its cache paths from the environment then,
-    # so anything that reaches `hf_hub_download` without an explicit
-    # `cache_dir` — the dataset card that `datasets` fetches to resolve the
-    # dataset id, plus a `.no_exist` marker — still goes to the default
-    # ~/.cache/huggingface/hub, as do dynamic-code modules under
-    # --trust_remote_code. That is a few KB and is not touched by
-    # --delete_hf_cache. Neuronpedia's script (which this block reproduces)
-    # sets the same variables at the same point and has the same gap.
+    # Confine every HF download (weights + hub metadata) to the cache dir so it
+    # can be wiped wholesale afterwards. Without this, downloads also leak into
+    # the default ~/.cache/huggingface and survive cleanup.
     cache_root: str | None = None
     if args.hf_cache_dir:
         cache_root = os.path.abspath(os.path.expanduser(args.hf_cache_dir))
         os.makedirs(cache_root, exist_ok=True)
         os.environ["HF_HOME"] = cache_root
-        # Present in Neuronpedia's script but effectless here: huggingface_hub
-        # already read HF_HUB_CACHE at import time, and the model/tokenizer
-        # loads below pass `cache_dir=` explicitly instead.
         os.environ["HF_HUB_CACHE"] = os.path.join(cache_root, "hub")
         os.environ["HF_XET_CACHE"] = os.path.join(cache_root, "xet")
         os.environ["HF_DATASETS_CACHE"] = os.path.join(cache_root, "datasets")
@@ -803,23 +719,8 @@ def main() -> None:
         tok = transformers.AutoTokenizer.from_pretrained(
             args.model, cache_dir=hub_cache, trust_remote_code=args.trust_remote_code
         )
-        # Upstream's `from_hf` docstring: "Do not combine [compile] with
-        # device_map='auto'". The problem is accelerate's per-block dispatch
-        # hooks, which only exist when the model actually spans several
-        # devices — 'auto' on a one-GPU host places everything on that GPU
-        # and is fine — so key on the resolved placement, not on the flag.
-        placements = set(getattr(hf, "hf_device_map", {}).values())
-        use_compile = not args.no_compile
-        if use_compile and len(placements) > 1:
-            logger.warning(
-                "model is sharded across %s; disabling torch.compile (upstream "
-                "jlens says not to combine it with device_map='auto'). Pass "
-                "--no_compile to silence this.",
-                sorted(map(str, placements)),
-            )
-            use_compile = False
         model = jlens.from_hf(
-            hf, tok, text_module=args.text_module, compile=use_compile
+            hf, tok, text_module=args.text_module, compile=not args.no_compile
         )
         print(f"Wrapped: {model!r}")
         source_layers, target_layer = resolve_layers(model.n_layers, args.target_layer)
@@ -843,28 +744,9 @@ def main() -> None:
                 "no prompts loaded — check --dataset/--dataset_config/--text_field"
             )
 
-        # What the checkpoint is a partial average *of*. Anything that changes
-        # the prompts fed to the estimator belongs here; n_prompts does not
-        # (extending a finished-early run with more prompts is legitimate) and
-        # neither do dim_batch/dtype/device_map (batching and precision only).
-        fit_config = {
-            "model": args.model,
-            "dataset": args.dataset,
-            "dataset_config": config,
-            "dataset_split": args.dataset_split,
-            "text_field": args.text_field,
-            "max_chars": args.max_chars,
-            "max_seq_len": args.max_seq_len,
-        }
-        resuming = not args.no_resume and os.path.exists(checkpoint_path)
-        if resuming:
-            print(
-                f"Resuming from checkpoint {checkpoint_path} (--no_resume to start over)"
-            )
         tracker = ConvergenceTracker(
             metrics_csv,
             thresholds,
-            append=resuming,
             stop_at_delta=args.stop_at_delta,
             min_prompts=args.min_prompts,
             window=args.stop_window,
@@ -884,8 +766,6 @@ def main() -> None:
                 max_seq_len=args.max_seq_len,
                 checkpoint_path=checkpoint_path,
                 checkpoint_every=args.checkpoint_every,
-                resume=resuming,
-                fit_config=fit_config,
                 progress=show_progress,
             )
         finally:

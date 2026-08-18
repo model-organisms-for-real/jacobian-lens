@@ -16,11 +16,6 @@ the convergence CSV, so a config can never drift from the run it describes.
 Add a run by appending to `LENSES` below — `argv` is exactly what was passed to
 `fit_lens.py`, and the source filenames follow from it.
 
-Two fields are *not* derived from the fit artifacts and are only right if this
-script is run on the machine that did the fitting: the `gpus:` block reads the
-local GPU at packaging time (see `gpu_description`), and the recorded command is
-whatever `LENSES` says it was. Package on the fitting host.
-
 Run::
 
     uv run python scripts/package_lenses.py --repo_id <user>/jacobian-lens
@@ -123,14 +118,7 @@ def read_results(csv_path: str) -> dict[str, str]:
 
 
 def gpu_description() -> tuple[str, str] | None:
-    """``(name, total_gb)`` for GPU 0 of *this* host, or None without CUDA.
-
-    This is read at packaging time, not fit time — ``fit_lens.py`` records no
-    hardware information — so it describes the GPU the lens was fitted on only
-    when packaging runs on the same machine as the fit. That is the intended
-    workflow (fit, then package, on one machine); run this script elsewhere and the
-    ``gpus:`` block in ``config.yaml`` will describe the wrong card.
-    """
+    """``(name, total_gb)`` for GPU 0, or None without CUDA."""
     if not torch.cuda.is_available():
         return None
     properties = torch.cuda.get_device_properties(0)
